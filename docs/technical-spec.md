@@ -44,7 +44,8 @@ Tin nhắn khách hàng
 ┌─────────────────────────────────────────────────────────┐
 │ 3. RANKING / EXPLANATION                                  │
 │   - Rule-based scoring (không phải LLM) → chọn Top N      │
-│   - LLM CHỈ nhận đúng Top N record (JSON) để diễn giải    │
+│   - M3 hiện chỉ ranking thuần code, chưa gọi LLM explain  │
+│   - LLM sau này CHỈ nhận đúng Top N record (JSON)         │
 │   - Prompt cấm LLM thêm thông tin ngoài record             │
 └─────────────────────────────────────────────────────────┘
    │
@@ -133,13 +134,13 @@ Response (khi còn thiếu slot):
 }
 ```
 
-Response (khi đủ slot, đã có kết quả — thuộc phạm vi Module 2-4, chưa triển khai trong lượt này):
+Response (khi đủ slot, đã có kết quả — Module 2-3 hiện trả retrieval + ranking thuần code):
 ```json
 {
   "session_id": "sess_abc123",
   "status": "ready",
   "state": { "category": "may_lanh", "slots": { "...": "..." }, "missing_slots": [] },
-  "results": ["... thuộc Milestone 2 ..."]
+  "results": ["... Top N ranked records thuộc Milestone 3 ..."]
 }
 ```
 
@@ -213,7 +214,7 @@ Thiết kế quan trọng: **`rejected_fields` không bao giờ bị xoá âm th
 | **M0 — Chuẩn bị dữ liệu** | Chuẩn hoá 2 sheet Máy lạnh & Tủ lạnh từ Excel thành schema lọc được; định nghĩa category schema | Song song với M1 |
 | **M1 — Slot-filling & Conversation State** | Canonical NLU, chuẩn hoá `location → installation_location`, merge state, tính missing slots bằng code, chống hỏi lặp, không âm thầm bỏ field sai, prompt builder truyền previous state + missing slots cho LLM | ✅ Đã triển khai |
 | **M2 — Retrieval/Filter** (lượt này) | Nạp catalog thật từ Excel vào bộ nhớ, parse các trường thông số dạng chuỗi tiếng Việt không đồng nhất, filter theo slot đã đủ bằng code, xử lý case 0 kết quả bằng cách nới ràng buộc theo trình tự định trước hoặc báo rõ "chưa có dữ liệu" | ✅ Triển khai trong lượt này |
-| **M3 — Ranking/Explanation** | Rule-based scoring cho Top N, prompt LLM chỉ nhận đúng Top N JSON để diễn giải, cấm suy diễn ngoài record | Kế tiếp |
+| **M3 — Rule-based Ranking** | Module `src/ranking/rankProducts.js` nhận kết quả `retrieveForState`, chọn Top N mặc định Top 3, tính score deterministic 0–100, trả `score_breakdown`, `matched_reasons`, `tradeoffs`, `missing_data`, `source`; tie-break theo giá rồi product_id; xử lý `not_ready`/`no_results`; orchestrator `src/recommendForState.js` nối state → retrieval/filter → ranking. Chưa làm LLM explanation. | ✅ Triển khai trong lượt này |
 | **M4 — Validation/Guardrail** | Đối chiếu số liệu LLM sinh ra với record gốc, gắn nguồn dữ liệu vào output, chặn câu trả lời sai lệch | Kế tiếp |
 | **M5 — HTTP layer + Frontend integration** | Nối Express route theo API contract ở mục 4, kết nối frontend chat UI | Kế tiếp |
 | **M6 — Demo & pilot plan** | Chuẩn bị video demo, lộ trình pilot 1-2 trang theo yêu cầu D3 | Cuối cùng |
@@ -243,3 +244,16 @@ Thiết kế quan trọng: **`rejected_fields` không bao giờ bị xoá âm th
   - Sản phẩm không có `effective_price` (thiếu cả giá gốc lẫn giá khuyến mãi) luôn bị loại, không được đưa vào tư vấn.
 - `backend/src/retrieveForState.js` — nối Module 1 (conversation state) với Module 2: chỉ gọi filter khi `missing_slots` rỗng, trả `not_ready` nếu state chưa đủ slot.
 - `backend/tests/parseSpecs.test.js`, `loadCatalog.test.js`, `filterProducts.test.js`, `retrieveForState.test.js` — test unit cho từng hàm parse/filter, và test tích hợp end-to-end từ hội thoại slot-filling tới kết quả lọc trên catalog thật.
+
+
+## 9. Milestone 3 — Rule-based Ranking Contract
+
+`backend/src/ranking/rankProducts.js` là module ranking thuần code, không gọi LLM. Input là kết quả từ `retrieveForState` và conversation state/slots; output là Top N (mặc định Top 3) với các field:
+
+- `rank`, `product_id`, `model_code`, `effective_price`, `total_score`.
+- `score_breakdown`: điểm thành phần 0–100. Máy lạnh chấm ngân sách, diện tích, độ ồn, tiết kiệm điện, nắng nếu khách có nêu. Tủ lạnh chấm ngân sách, số người, dung tích, loại cửa, tiết kiệm điện nếu khách có nêu.
+- `matched_reasons`, `tradeoffs`, `missing_data`. Field null/không parse được không được suy diễn; ranking ghi vào `missing_data` và dùng điểm trung lập 50.
+- `relaxed_constraints`: copy từ retrieval khi status là `relaxed` để biết constraint nào đã được nới.
+- `source`: clone của product record gốc để Milestone 4–5 validate/render mà không cần LLM tự tra cứu.
+
+Tie-break ổn định: `total_score` giảm dần, sau đó `effective_price` tăng dần, cuối cùng `product_id` tăng dần. `backend/src/recommendForState.js` là orchestrator nối conversation state → retrieval/filter → ranking.
